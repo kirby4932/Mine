@@ -12,6 +12,7 @@ repositories {
 dependencies {
     testImplementation platform('org.junit:junit-bom:6.0.2')
     testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
     implementation("com.discord4j:discord4j-core:3.3.0")
     implementation 'ch.qos.logback:logback-classic:1.5.27'
     implementation 'org.mariadb.jdbc:mariadb-java-client:3.5.7'

@@ -11,6 +11,8 @@ import discord4j.core.event.domain.interaction.ChatInputInteractionEvent;
 import discord4j.core.spec.EmbedCreateSpec;
 import discord4j.core.spec.InteractionFollowupCreateSpec;
 import discord4j.core.spec.MessageEditSpec;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
 
@@ -20,6 +22,8 @@ import java.util.List;
 import static ch.kirby.util.SharedFormatter.*;
 
 public class LeaderboardCommand implements Command, ButtonHandler {
+
+    private static final Logger LOGGER = LoggerFactory.getLogger(LeaderboardCommand.class);
 
     @Override
     public String getName() {
@@ -54,7 +58,15 @@ public class LeaderboardCommand implements Command, ButtonHandler {
                                 .build();
                     }
                 }).subscribeOn(Schedulers.boundedElastic()))
-                .flatMap(event::createFollowup).then();
+                .flatMap(event::createFollowup)
+                // a rejected followup used to surface only as a WARN, leaving the interaction unanswered
+                .onErrorResume(error -> {
+                    LOGGER.error("Failed to deliver /leaderboard reply", error);
+                    return event.createFollowup(InteractionFollowupCreateSpec.builder()
+                            .addEmbed(errorEmbed(error))
+                            .build());
+                })
+                .then();
     }
 
     @Override
@@ -100,6 +112,14 @@ public class LeaderboardCommand implements Command, ButtonHandler {
                                 .components(List.of(defaultStatsComponents("leaderboard", dayspan, 0L)))
                                 .build();
                         return message.edit(resultSpec);
+                    })
+                    // without this the message would sit on the loading embed forever
+                    .onErrorResume(error -> {
+                        LOGGER.error("Failed to refresh /leaderboard message", error);
+                        return message.edit(MessageEditSpec.builder()
+                                .embeds(List.of(errorEmbed(error)))
+                                .components(List.of(defaultStatsComponents("leaderboard", dayspan, 0L)))
+                                .build());
                     });
         }).then();
     }

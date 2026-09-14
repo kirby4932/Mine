@@ -12,6 +12,8 @@ import discord4j.core.object.entity.Guild;
 import discord4j.core.spec.EmbedCreateSpec;
 import discord4j.core.spec.InteractionFollowupCreateSpec;
 import discord4j.core.spec.MessageEditSpec;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
 
@@ -23,6 +25,8 @@ import java.util.stream.Collectors;
 import static ch.kirby.util.SharedFormatter.*;
 
 public class ServerLeaderboardCommand implements Command, ButtonHandler {
+
+    private static final Logger LOGGER = LoggerFactory.getLogger(ServerLeaderboardCommand.class);
 
     @Override
     public String getName() {
@@ -62,7 +66,15 @@ public class ServerLeaderboardCommand implements Command, ButtonHandler {
                                                         .build();
                                             }
                                         }).subscribeOn(Schedulers.boundedElastic()))))
-                        .flatMap(event::createFollowup).then())
+                        .flatMap(event::createFollowup)
+                        // a rejected followup used to surface only as a WARN, leaving the interaction unanswered
+                        .onErrorResume(error -> {
+                            LOGGER.error("Failed to deliver /serverleaderboard reply", error);
+                            return event.createFollowup(InteractionFollowupCreateSpec.builder()
+                                    .addEmbed(errorEmbed(error))
+                                    .build());
+                        })
+                        .then())
                 .orElseGet(() -> event.reply("This command can only be used in a server.").withEphemeral(true));
     }
 
@@ -120,6 +132,14 @@ public class ServerLeaderboardCommand implements Command, ButtonHandler {
                                         .components(List.of(defaultStatsComponents("serverleaderboard", dayspan, 0L)))
                                         .build();
                                 return message.edit(resultSpec);
+                            })
+                            // without this the message would sit on the loading embed forever
+                            .onErrorResume(error -> {
+                                LOGGER.error("Failed to refresh /serverleaderboard message", error);
+                                return message.edit(MessageEditSpec.builder()
+                                        .embeds(List.of(errorEmbed(error)))
+                                        .components(List.of(defaultStatsComponents("serverleaderboard", dayspan, 0L)))
+                                        .build());
                             });
                 }).then())
                 .orElse(Mono.empty());

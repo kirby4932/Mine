@@ -75,18 +75,19 @@ services:
 
 ## Database Indexes
 
-The bot queries the Activity table extensively. For optimal performance, the following indexes are required on the `sugu` database.
+The schema is owned by Sugu. The list below is the verified live state of the `sugu`
+database, not a wishlist -- it was dumped from `information_schema.statistics` on
+2026-09-14.
 
 ### Activity Table Indexes
 
 ```sql
 -- Foreign key indexes (created by Sugu)
-CREATE INDEX auto_app_id ON Activity (auto_app_id);
-CREATE INDEX auto_user_id ON Activity (auto_user_id);
-CREATE INDEX auto_status_id ON Activity (auto_status_id);
-CREATE INDEX auto_app_state_id ON Activity (auto_app_state_id);
+CREATE INDEX auto_user_id       ON Activity (auto_user_id);
+CREATE INDEX auto_status_id     ON Activity (auto_status_id);
+CREATE INDEX auto_app_state_id  ON Activity (auto_app_state_id);
 
--- Composite index for /spotify queries (listening activities)
+-- /spotify and Spotify leaderboards (listening activities)
 CREATE INDEX idx_activity_listening_lookup ON Activity (
     auto_type_id,
     auto_app_id,
@@ -96,7 +97,7 @@ CREATE INDEX idx_activity_listening_lookup ON Activity (
     auto_app_state_id
 );
 
--- Composite index for /stats and /leaderboard queries (playing activities)
+-- /stats and game leaderboards (playing activities)
 CREATE INDEX idx_activity_playing_lookup ON Activity (
     auto_type_id,
     auto_user_id,
@@ -104,32 +105,67 @@ CREATE INDEX idx_activity_playing_lookup ON Activity (
     starttime
 );
 
--- Composite index for unfiltered total-hours aggregations (no type filter)
--- Required when querying SUM(hours) grouped by app+user without a WHERE on auto_type_id,
--- since idx_activity_playing_lookup won't be used (leading column not in WHERE)
+-- Unfiltered total-hours aggregations (no type filter).
+-- Also serves the auto_app_id foreign key as its leading column, which is why
+-- no standalone auto_app_id index exists.
 CREATE INDEX idx_activity_app_user ON Activity (auto_app_id, auto_user_id);
 ```
 
-### Lookup Table Indexes (Optional)
-
-These indexes on lookup tables can provide minor performance improvements:
+### Lookup Table Indexes
 
 ```sql
--- User table: for username lookups
-CREATE INDEX idx_user_username ON User (username);
-
--- Type table: for type lookups ('playing', 'listening')
-CREATE INDEX idx_type_type ON Type (type);
-
--- Application table: for app name lookups ('Spotify', game names)
-CREATE INDEX idx_application_name ON Application (name);
+CREATE INDEX idx_user_username     ON User (username(768));
+CREATE INDEX idx_type_type         ON Type (type(768));
+CREATE INDEX idx_application_name  ON Application (name(768));
+CREATE INDEX idx_appstate_lookup   ON AppState (state(128), details(128));
 ```
 
-### AppState Lookup Index (Required)
+`User.user_id` and `Application.app_id` additionally carry unique indexes created by Sugu.
 
-```sql
-CREATE INDEX idx_appstate_lookup ON AppState (state(128), details(128));
-```
+### Measured Query Cost
+
+Median of three runs, `SQL_NO_CACHE`, measured 2026-09-14 against 8.27M Activity rows:
+
+| Command | Dayspan | Duration |
+| --- | --- | --- |
+| `/stats` (single user) | 7 | 0.33 s |
+| `/stats` (single user) | 365 | 1.45 s |
+| `/leaderboard` (global) | 7 | 5.08 s |
+| `/leaderboard` (global) | 365 | 15.76 s |
+| `/leaderboard spotify` (global) | 365 | 7.11 s |
+
+The global leaderboards are slow because they aggregate every user's rows:
+1,240,580 `playing` rows fall inside a 365-day window, out of 3,821,419 total.
+
+### Why There Is No `(auto_type_id, starttime, ...)` Index
+
+A covering index `(auto_type_id, starttime, auto_user_id, auto_app_id, endtime)` was
+built and benchmarked on 2026-09-14 to speed up the global leaderboards. **It was
+dropped again -- it made every query slower.**
+
+| Query | Before | With index |
+| --- | --- | --- |
+| `/stats` 365 | 1.45 s | 2.19 s |
+| `/leaderboard` global 365 | 15.76 s | 19.15 s |
+| `/leaderboard spotify` 365 | 7.11 s | 7.58 s |
+
+Two reasons, both worth knowing before trying again:
+
+1. **The range scan never happens.** The queries join `Type` to resolve
+   `type = 'playing'` into `auto_type_id`, so that column is a join reference, not a
+   constant. MariaDB can `ref` on it but cannot then range-scan `starttime` in the
+   next index position. `EXPLAIN` confirmed `key_len: 5` -- only `auto_type_id` was
+   used. Rewriting the predicate as a literal `auto_type_id = 1` did not help either
+   (16.2 s vs 15.8 s).
+
+2. **The buffer pool is the real constraint.** `innodb_buffer_pool_size` is 256 MB
+   against roughly 2.1 GB of Activity data plus indexes, on a host with 15 GB RAM.
+   `Innodb_buffer_pool_pages_free` sits at 1 of 16128. Every query is disk-bound, so
+   adding 280 MB of index only increased cache pressure.
+
+Raising `innodb_buffer_pool_size` is the change that would actually move these
+numbers. It is a MariaDB container setting and affects Sugu as well, so it is not
+made here.
 
 ### Viewing Existing Indexes
 

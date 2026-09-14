@@ -15,16 +15,55 @@ import ch.kirby.model.SpotifyStats;
 
 public class SharedFormatter {
 
+    // Discord rejects an embed field value longer than this with a 400, so we only ever build up to it
+    private static final int FIELD_VALUE_LIMIT = 1024;
+
     public static String formatBreakdown(Map<String, Double> breakdown) {
-        StringBuilder sb = new StringBuilder();
-        breakdown.entrySet().stream()
+        List<String> lines = breakdown.entrySet().stream()
                 .sorted((a, b) -> Double.compare(b.getValue(), a.getValue()))
-                .forEach(entry -> {
-                    String game = entry.getKey();
-                    double hours = entry.getValue();
-                    sb.append(String.format("• %-20s: `%,.2f h`\n", game, hours));
-                });
+                .map(e -> String.format("• %s: `%,.2f h`\n", e.getKey(), e.getValue()))
+                .toList();
+
+        if (lines.isEmpty()) {
+            return "No data found";
+        }
+
+        StringBuilder sb = new StringBuilder();
+        int shown = 0;
+        for (String line : lines) {
+            // hold back room for the overflow notice so appending it later cannot push us over
+            boolean isLast = shown == lines.size() - 1;
+            int reserve = isLast ? 0 : overflowNotice(lines.size()).length();
+            if (sb.length() + line.length() + reserve > FIELD_VALUE_LIMIT) break;
+            sb.append(line);
+            shown++;
+        }
+        if (shown == 0) {
+            return clampFieldValue(lines.get(0));
+        }
+        if (shown < lines.size()) {
+            sb.append(overflowNotice(lines.size() - shown));
+        }
         return sb.toString();
+    }
+
+    private static String overflowNotice(int hidden) {
+        return String.format("… and %d more", hidden);
+    }
+
+    // backstop: Application.name is a TEXT column, so nothing in the schema bounds a single line
+    private static String clampFieldValue(String value) {
+        return value.length() <= FIELD_VALUE_LIMIT
+                ? value
+                : value.substring(0, FIELD_VALUE_LIMIT - 1) + "…";
+    }
+
+    public static EmbedCreateSpec errorEmbed(Throwable error) {
+        String reason = error.getMessage() != null ? error.getMessage() : error.getClass().getSimpleName();
+        return EmbedCreateSpec.builder()
+                .title("⚠️ Something went wrong")
+                .description(clampFieldValue(reason))
+                .build();
     }
 
     public static EmbedCreateSpec formatLeaderboard(List<GameStats> stats, String game, int dayspan) {
@@ -90,8 +129,8 @@ public class SharedFormatter {
 
         return EmbedCreateSpec.builder()
                 .title("🎧 Spotify Stats for " + username)
-                .addField("🎵 Top Songs", songSection.length() > 0 ? songSection.toString() : "No data found", false)
-                .addField("🎤 Top Artists", artistSection.length() > 0 ? artistSection.toString() : "No data found", false)
+                .addField("🎵 Top Songs", clampFieldValue(songSection.length() > 0 ? songSection.toString() : "No data found"), false)
+                .addField("🎤 Top Artists", clampFieldValue(artistSection.length() > 0 ? artistSection.toString() : "No data found"), false)
                 .footer("Timespan: " + dayspan + " days", null)
                 .build();
     }
@@ -107,7 +146,7 @@ public class SharedFormatter {
                         .title("Stats for " + stats.getUsername())
                         .description("Total playtime over the last " + dayspan + " days.")
                         .addField("Total Hours", stats.getTotalHours() + "h", false)
-                        .addField("Breakdown", SharedFormatter.formatBreakdown(stats.getGameBreakdown()), false)
+                        .addField("Breakdown", clampFieldValue(formatBreakdown(stats.getGameBreakdown())), false)
                         .build()
         );
         return specs;
